@@ -1,12 +1,9 @@
 import 'dart:async';
-import 'dart:convert';
 import 'package:flutter/foundation.dart';
-import 'package:http/http.dart' as http;
+import 'onnx_service.dart';
 import 'package:sensors_plus/sensors_plus.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 class SensorProvider with ChangeNotifier {
-  static const String baseUrl = 'http://192.168.100.91:8000'; // Laptop local IP
   
   final List<double> _xBuffer = [];
   final List<double> _yBuffer = [];
@@ -15,7 +12,6 @@ class SensorProvider with ChangeNotifier {
   int _newSamplesCount = 0;
   bool _isProcessing = false;
   bool _isInCooldown = false;
-  String? _email;
   
   StreamSubscription<AccelerometerEvent>? _subscription;
   
@@ -30,12 +26,8 @@ class SensorProvider with ChangeNotifier {
   bool get isRecording => _subscription != null;
 
   SensorProvider() {
-    _loadEmail();
-  }
-
-  Future<void> _loadEmail() async {
-    final prefs = await SharedPreferences.getInstance();
-    _email = prefs.getString('emergency_email');
+    // initialize onnx model in background
+    OnnxService.init();
   }
 
   void startListening() {
@@ -71,7 +63,7 @@ class SensorProvider with ChangeNotifier {
       // Every 64 new samples, if we have a full buffer (128), send to backend
       if (_newSamplesCount >= 64 && _xBuffer.length == 128 && !_isProcessing) {
         _newSamplesCount = 0;
-        _sendDataToBackend();
+        _runLocalInference();
       }
       
       notifyListeners();
@@ -84,40 +76,21 @@ class SensorProvider with ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> _sendDataToBackend() async {
-    if (_email == null) {
-      await _loadEmail();
-      if (_email == null) return;
-    }
-
+  Future<void> _runLocalInference() async {
     _isProcessing = true;
-    
+
     // Copy current buffer to avoid race conditions if needed
     final x = List<double>.from(_xBuffer);
     final y = List<double>.from(_yBuffer);
     final z = List<double>.from(_zBuffer);
 
     try {
-      final response = await http.post(
-        Uri.parse('$baseUrl/predict'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({
-          'x': x,
-          'y': y,
-          'z': z,
-          'email': _email,
-        }),
-      ).timeout(const Duration(seconds: 2));
-
-      if (response.statusCode == 200) {
-        final result = jsonDecode(response.body);
-        if (result['fall_detected'] == true) {
-          // You might want to handle this globally or via a callback
-          _onFallDetected();
-        }
+      final fall = await OnnxService.predict(x, y, z);
+      if (fall) {
+        _onFallDetected();
       }
     } catch (e) {
-      debugPrint('Error sending data to backend: $e');
+      debugPrint('Error running local inference: $e');
     } finally {
       _isProcessing = false;
     }
