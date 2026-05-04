@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'onnx_service.dart';
+import 'email_service.dart';
 import 'package:sensors_plus/sensors_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class SensorProvider with ChangeNotifier {
   
@@ -11,7 +13,11 @@ class SensorProvider with ChangeNotifier {
   
   int _newSamplesCount = 0;
   bool _isProcessing = false;
-  bool _isInCooldown = false;
+  bool _isPaused = false; // Pause recording but keep readings
+  bool _emailSent = false;
+  
+  int _emailCountdown = 0;
+  Timer? _emailCountdownTimer;
   
   StreamSubscription<AccelerometerEvent>? _subscription;
   
@@ -24,6 +30,9 @@ class SensorProvider with ChangeNotifier {
   List<double> get zBuffer => _zBuffer;
   
   bool get isRecording => _subscription != null;
+  bool get isPaused => _isPaused;
+  int get emailCountdown => _emailCountdown;
+  bool get emailSent => _emailSent;
 
   SensorProvider() {
     // initialize onnx model in background
@@ -37,16 +46,13 @@ class SensorProvider with ChangeNotifier {
     _yBuffer.clear();
     _zBuffer.clear();
     _newSamplesCount = 0;
+    _isPaused = false;
+    _emailCountdown = 0;
+    _emailSent = false;
 
     // accelerometerEventStream includes gravity
     _subscription = accelerometerEventStream(samplingPeriod: const Duration(milliseconds: 40)).listen((AccelerometerEvent event) {
-      if (_isInCooldown) return;
-      
-      // // High-pass filter to remove gravity and get linear acceleration
-      // _gx = _alpha * _gx + (1 - _alpha) * event.x;
-      // _gy = _alpha * _gy + (1 - _alpha) * event.y;
-      // _gz = _alpha * _gz + (1 - _alpha) * event.z;
-
+      // Always add to buffer for visualization (even during pause)
       _xBuffer.add(event.x);
       _yBuffer.add(event.y);
       _zBuffer.add(event.z);
@@ -58,12 +64,15 @@ class SensorProvider with ChangeNotifier {
         _zBuffer.removeAt(0);
       }
       
-      _newSamplesCount++;
-      
-      // Every 64 new samples, if we have a full buffer (128), send to backend
-      if (_newSamplesCount >= 64 && _xBuffer.length == 128 && !_isProcessing) {
-        _newSamplesCount = 0;
-        _runLocalInference();
+      // Only process/record if not paused
+      if (!_isPaused) {
+        _newSamplesCount++;
+        
+        // Every 64 new samples, if we have a full buffer (128), send to backend
+        if (_newSamplesCount >= 64 && _xBuffer.length == 128 && !_isProcessing) {
+          _newSamplesCount = 0;
+          _runLocalInference();
+        }
       }
       
       notifyListeners();
@@ -100,23 +109,61 @@ class SensorProvider with ChangeNotifier {
   Function? onFallDetected;
 
   void _onFallDetected() {
-    if (_isInCooldown) return;
-    
-    _isInCooldown = true;
-    
-    // Clear buffers and reset counter immediately
-    _xBuffer.clear();
-    _yBuffer.clear();
-    _zBuffer.clear();
-    _newSamplesCount = 0;
+    _isPaused = true;
+    _emailCountdown = 10;
+    _emailSent = false;
     
     if (onFallDetected != null) {
       onFallDetected!();
     }
     
-    // Resume after 10 seconds (no API calls are sent during cooldown due to early return in listener)
+    // Start countdown timer for email sending
+    _emailCountdownTimer?.cancel();
+    _emailCountdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      _emailCountdown--;
+      notifyListeners();
+      
+      if (_emailCountdown <= 0) {
+        timer.cancel();
+        if (!_emailSent) {
+          _sendFallAlertEmail();
+        }
+      }
+    });
+    
+    notifyListeners();
+  }
+  
+  /// Cancel the pending email and resume normal operation
+  Future<void> dismissAlert() async {
+    _emailCountdownTimer?.cancel();
+    _isPaused = false;
+    _emailCountdown = 0;
+    _emailSent = true; // Mark as handled to prevent sending
+    _newSamplesCount = 0;
+    notifyListeners();
+  }
+  
+  /// Send the fall alert email to the emergency contact
+  Future<void> _sendFallAlertEmail() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final emergencyEmail = prefs.getString('emergency_email');
+      
+      if (emergencyEmail != null && emergencyEmail.isNotEmpty) {
+        final success = await EmailService.sendFallAlert(emergencyEmail, 'User');
+        if (success) {
+          _emailSent = true;
+          debugPrint('Fall alert email sent successfully to $emergencyEmail');
+        }
+      }
+    } catch (e) {
+      debugPrint('Error sending fall alert email: $e');
+    }
+    
+    // Resume after the full 10 seconds pause
     Timer(const Duration(seconds: 10), () {
-      _isInCooldown = false;
+      _isPaused = false;
       notifyListeners();
     });
     
@@ -126,6 +173,7 @@ class SensorProvider with ChangeNotifier {
   @override
   void dispose() {
     stopListening();
+    _emailCountdownTimer?.cancel();
     super.dispose();
   }
 }

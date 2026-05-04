@@ -18,31 +18,59 @@ class _MainScreenState extends State<MainScreen> {
     widget.provider.startListening();
   }
 
-  void _showFallAlert() {
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) => AlertDialog(
-        backgroundColor: Colors.red[900],
-        title: const Row(
-          children: [
-            Icon(Icons.warning, color: Colors.white),
-            SizedBox(width: 10),
-            Text('FALL DETECTED!', style: TextStyle(color: Colors.white)),
-          ],
+  Future<void> _showFallAlert() async {
+    late VoidCallback listener;
+    void Function(void Function())? dialogSetState;
+    listener = () {
+      dialogSetState?.call(() {});
+    };
+
+    widget.provider.addListener(listener);
+
+    try {
+      await showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => StatefulBuilder(
+          builder: (context, setState) {
+            dialogSetState = setState;
+
+            final countdownText = widget.provider.emailCountdown > 0
+                ? 'I am Ok (${widget.provider.emailCountdown})'
+                : 'I am Ok';
+
+            return AlertDialog(
+              backgroundColor: Colors.red[900],
+              title: const Row(
+                children: [
+                  Icon(Icons.warning, color: Colors.white),
+                  SizedBox(width: 10),
+                  Text('FALL DETECTED!', style: TextStyle(color: Colors.white)),
+                ],
+              ),
+              content: const Text(
+                'A fall has been detected. Press the button below within 10 seconds to cancel the alert email.',
+                style: TextStyle(color: Colors.white),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () {
+                    widget.provider.dismissAlert();
+                    Navigator.pop(context);
+                  },
+                  child: Text(
+                    countdownText,
+                    style: const TextStyle(color: Colors.white),
+                  ),
+                ),
+              ],
+            );
+          },
         ),
-        content: const Text(
-          'An alert has been sent to your emergency contact.',
-          style: TextStyle(color: Colors.white),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('I am OK', style: TextStyle(color: Colors.white)),
-          ),
-        ],
-      ),
-    );
+      );
+    } finally {
+      widget.provider.removeListener(listener);
+    }
   }
 
   @override
